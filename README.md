@@ -2,4 +2,4 @@
 
 Author: Tan Hung Jiun
 
-Proposed title: _Development of a GPU-accelerated C++ solver for acoustic scattering_
+Proposed title: _Numerical Simulation of the Pennes Bioheat Equation using FEniCSx_
