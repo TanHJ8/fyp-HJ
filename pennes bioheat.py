@@ -5,13 +5,6 @@ from dolfinx import mesh, fem, io
 from dolfinx.fem.petsc import LinearProblem
 import ufl
 
-# --- SAFETY: CLEAN UP OLD FILES ---
-# Deletes old results so the code doesn't crash on re-run
-if os.path.exists("heat_simulation.xdmf"):
-    os.remove("heat_simulation.xdmf")
-if os.path.exists("heat_simulation.h5"):
-    os.remove("heat_simulation.h5")
-
 # 1. DEFINE THE DOMAIN
 domain = mesh.create_unit_square(MPI.COMM_WORLD, 64, 64, mesh.CellType.quadrilateral)
 
