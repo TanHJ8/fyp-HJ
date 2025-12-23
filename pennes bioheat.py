@@ -5,6 +5,13 @@ from dolfinx import mesh, fem, io
 from dolfinx.fem.petsc import LinearProblem
 import ufl
 
+# --- SAFETY: CLEAN UP OLD FILES ---
+# Deletes old results so the code doesn't crash on re-run
+if os.path.exists("heat_simulation.xdmf"):
+    os.remove("heat_simulation.xdmf")
+if os.path.exists("heat_simulation.h5"):
+    os.remove("heat_simulation.h5")
+
 # 1. DEFINE THE DOMAIN
 domain = mesh.create_unit_square(MPI.COMM_WORLD, 64, 64, mesh.CellType.quadrilateral)
 
@@ -41,7 +48,8 @@ a = ufl.lhs(F)
 L = ufl.rhs(F)
 
 problem = LinearProblem(a, L, bcs=[bc], 
-                        petsc_options={"ksp_type": "preonly", "pc_type": "lu"})
+                        petsc_options={"ksp_type": "preonly", "pc_type": "lu"},
+                        petsc_options_prefix="heat_solver")
 
 # 7. TIME LOOP
 print("Starting simulation...")
@@ -64,4 +72,3 @@ with io.XDMFFile(domain.comm, "heat_simulation.xdmf", "w") as xdmf:
             print(f"Time step {i+1}/{num_steps} completed (t={t:.2f})")
 
 print("Done! Check the Files folder.")
-
