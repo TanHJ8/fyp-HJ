@@ -41,8 +41,7 @@ a = ufl.lhs(F)
 L = ufl.rhs(F)
 
 problem = LinearProblem(a, L, bcs=[bc], 
-                        petsc_options={"ksp_type": "preonly", "pc_type": "lu"},
-                        petsc_options_prefix="heat_solver")
+                        petsc_options={"ksp_type": "preonly", "pc_type": "lu"})
 
 # 7. TIME LOOP
 print("Starting simulation...")
