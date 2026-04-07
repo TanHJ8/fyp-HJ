@@ -1,0 +1,104 @@
+import numpy as np
+import os
+from mpi4py import MPI
+from dolfinx import mesh, fem, io
+from dolfinx.fem.petsc import LinearProblem
+import ufl
+
+# 1. DEFINE THE DOMAIN
+# 64x64 is a good balance between speed and detail
+domain = mesh.create_unit_square(MPI.COMM_WORLD, 64, 64, mesh.CellType.quadrilateral)
+
+# 2. DEFINE FUNCTION SPACE
+V = fem.functionspace(domain, ("Lagrange", 1))
+
+# 3. PARAMETERS (Physically consistent for Bioheat)
+t = 0
+T_final = 10.0      # Total simulation time in seconds
+num_steps = 50      # Number of frames in the animation
+dt = T_final / num_steps
+
+# Tissue properties (Water-like)
+rho = 1000.0    # kg/m^3
+c = 4180.0      # J/(kg*K)
+k = 0.5         # W/(m*K)
+
+# Blood properties (Pennes constants)
+rho_b = 1060.0
+c_b = 3800.0
+w_b = 0.0005    # Perfusion rate (1/s)
+T_a = 37.0      # Arterial blood temp (Celsius)
+
+# Gaussian Source (Q_ext)
+A = 500000.0    # Peak power intensity
+x0, y0 = 0.5, 0.5 
+sigma = 0.2    # Width of the focus spot (Keep small for the bullseye look)
+
+# 4. BOUNDARY CONDITIONS
+# Keep the edges of the tissue at body temperature (37C)
+tdim = domain.topology.dim
+fdim = tdim - 1
+domain.topology.create_connectivity(fdim, tdim)
+boundary_facets = mesh.exterior_facet_indices(domain.topology)
+boundary_dofs = fem.locate_dofs_topological(V, fdim, boundary_facets)
+
+u_D = fem.Function(V)
+u_D.x.array[:] = T_a 
+bc = fem.dirichletbc(u_D, boundary_dofs)
+
+# 5. INITIAL CONDITION
+T_n = fem.Function(V)
+T_n.name = "Temperature"
+T_n.x.array[:] = T_a  # Entire domain starts at 37C
+
+# Define the Gaussian Source Function
+Q_ext = fem.Function(V)
+def gaussian_expression(x):
+    return A * np.exp(-((x[0] - x0)**2 + (x[1] - y0)**2) / (2 * sigma**2))
+Q_ext.interpolate(gaussian_expression)
+
+# 6. VARIATIONAL PROBLEM
+u, v = ufl.TrialFunction(V), ufl.TestFunction(V)
+
+# LHS (a): Terms with the unknown 'u'
+a = (rho * c * u / dt * v * ufl.dx 
+     + k * ufl.dot(ufl.grad(u), ufl.grad(v)) * ufl.dx 
+     + rho_b * c_b * w_b * u * v * ufl.dx)
+
+# RHS (L): Known terms from source and previous time step
+L = (rho * c * T_n / dt * v * ufl.dx 
+     + rho_b * c_b * w_b * T_a * v * ufl.dx 
+     + Q_ext * v * ufl.dx)
+
+# Note: petsc_options_prefix is mandatory when using petsc_options
+problem = LinearProblem(a, L, bcs=[bc],
+                        petsc_options={"ksp_type": "preonly", "pc_type": "lu"},
+                        petsc_options_prefix="bioheat_solver")
+
+# 7. TIME LOOP
+print("Starting bioheat simulation...")
+# Create a results folder if it doesn't exist
+if not os.path.exists("results"):
+    os.makedirs("results")
+
+with io.XDMFFile(domain.comm, "results/bioheat_results_correct1.xdmf", "w") as xdmf:
+    xdmf.write_mesh(domain)
+    
+    for i in range(num_steps):
+        t += dt
+        
+        # Solve current step
+        T_h = problem.solve()
+        
+        # Save to file
+        T_h.name = "Temperature"
+        xdmf.write_function(T_h, t)
+
+        # Update T_n for the next iteration
+        T_n.x.array[:] = T_h.x.array
+
+        if (i+1) % 10 == 0:
+            max_T = np.max(T_h.x.array)
+            print(f"Step {i+1}/{num_steps}: Max Temp = {max_T:.2f} C")
+
+print("Finished! Output saved to results/bioheat_results_correct1.xdmf")
