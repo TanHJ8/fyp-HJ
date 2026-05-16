@@ -1,0 +1,141 @@
+import numpy as np
+import os
+from mpi4py import MPI
+from dolfinx import mesh, fem, io
+from dolfinx.fem.petsc import LinearProblem
+import ufl
+from scipy.interpolate import RegularGridInterpolator
+
+# ==========================================
+# 1. LOAD AND PREPARE REAL PRESSURE DATA
+# ==========================================
+# Load the dictionary from your saved .npy file
+data_dict = np.load('pressure_result_for_bioheat.npy', allow_pickle=True).item()
+
+x_coords = data_dict['x_coords']  
+y_coords = data_dict['y_coords']  
+P0_data = data_dict['pressure_amplitude']
+
+# RegularGridInterpolator expects the first dimension to match the first coordinate array.
+# If shape is (241, 141) and y_coords is 141, we transpose to (141, 241).
+if P0_data.shape[0] != len(y_coords):
+    P0_data = P0_data.T
+
+# Create the interpolator (Mapping Y then X for proper matrix indexing)
+interp_P0 = RegularGridInterpolator((y_coords, x_coords), P0_data, 
+                                    bounds_error=False, fill_value=0)
+
+# ==========================================
+# 2. DEFINE THE PHYSICAL DOMAIN
+# ==========================================
+x_min, x_max = np.min(x_coords), np.max(x_coords)
+y_min, y_max = np.min(y_coords), np.max(y_coords)
+
+# Create a mesh matching the physical dimensions of the pressure field
+# [100, 100] is the mesh resolution; increase for higher accuracy
+domain = mesh.create_rectangle(MPI.COMM_WORLD, 
+                               [np.array([x_min, y_min]), np.array([x_max, y_max])], 
+                               [100, 100], mesh.CellType.quadrilateral)
+
+# ==========================================
+# 3. DEFINE PHYSICAL CONSTANTS
+# ==========================================
+rho = 1000.0        # Tissue density (kg/m^3)
+c_tissue = 4180.0   # Tissue specific heat (J/kg*K)
+k = 0.6             # Thermal conductivity (W/m*K)
+alpha = 5.0         # Absorption coefficient (Np/m)
+c_sound = 1540.0    # Speed of sound (m/s)
+
+# Blood Perfusion (Pennes constants)
+rho_b = 1060.0      # Blood density
+c_b = 3800.0        # Blood specific heat
+w_b = 0.0005        # Perfusion rate (1/s)
+T_a = 37.0          # Arterial blood temp (Celsius)
+
+# Time Stepping
+T_final = 20.0      # Total heating duration (seconds)
+num_steps = 50      # Number of simulation frames
+dt = T_final / num_steps
+
+# ==========================================
+# 4. INTERPOLATE PRESSURE TO HEAT SOURCE (Q_ext)
+# ==========================================
+V = fem.functionspace(domain, ("Lagrange", 1))
+Q_ext = fem.Function(V)
+
+def pressure_to_heat_source(x):
+    """
+    Converts FEniCS coordinates to Pressure, then to Heat.
+    x[0] is X-coordinate, x[1] is Y-coordinate.
+    """
+    # Map FEniCS points to (y, x) for the interpolator
+    pts = np.stack((x[1], x[0]), axis=-1)
+    P_local = interp_P0(pts)
+    
+    # Physics formula: Q = (alpha * P^2) / (rho * c_sound)
+    return (alpha * P_local**2) / (rho * c_sound)
+
+Q_ext.interpolate(pressure_to_heat_source)
+
+# ==========================================
+# 5. INITIAL & BOUNDARY CONDITIONS
+# ==========================================
+# Constant Body Temp (37C) at the boundaries
+tdim = domain.topology.dim
+fdim = tdim - 1
+domain.topology.create_connectivity(fdim, tdim)
+boundary_facets = mesh.exterior_facet_indices(domain.topology)
+boundary_dofs = fem.locate_dofs_topological(V, fdim, boundary_facets)
+
+u_D = fem.Function(V)
+u_D.x.array[:] = T_a 
+bc = fem.dirichletbc(u_D, boundary_dofs)
+
+# Initial temperature field
+T_n = fem.Function(V)
+T_n.x.array[:] = T_a 
+
+# ==========================================
+# 6. VARIATIONAL FORMULATION (Pennes Equation)
+# ==========================================
+u, v = ufl.TrialFunction(V), ufl.TestFunction(V)
+
+# Implicit Euler discretization
+a = (rho * c_tissue * u / dt * v * ufl.dx 
+     + k * ufl.dot(ufl.grad(u), ufl.grad(v)) * ufl.dx 
+     + rho_b * c_b * w_b * u * v * ufl.dx)
+
+L = (rho * c_tissue * T_n / dt * v * ufl.dx 
+     + rho_b * c_b * w_b * T_a * v * ufl.dx 
+     + Q_ext * v * ufl.dx)
+
+problem = LinearProblem(a, L, bcs=[bc],
+                        petsc_options={"ksp_type": "preonly", "pc_type": "lu"},
+                        petsc_options_prefix="bioheat_solver")
+
+# ==========================================
+# 7. EXECUTION & RESULTS EXPORT
+# ==========================================
+if not os.path.exists("results"):
+    os.makedirs("results")
+
+xdmf = io.XDMFFile(domain.comm, "results/pennes_bioheat_real_data.xdmf", "w")
+xdmf.write_mesh(domain)
+
+print(f"Starting Bioheat Simulation ({num_steps} steps)...")
+t = 0
+for i in range(num_steps):
+    t += dt
+    T_h = problem.solve()
+    
+    T_h.name = "Temperature"
+    xdmf.write_function(T_h, t)
+    
+    # Update for next time step
+    T_n.x.array[:] = T_h.x.array
+
+    if (i+1) % 10 == 0:
+        print(f"Step {i+1}/{num_steps} | Max Temp: {np.max(T_h.x.array):.2f} C")
+
+xdmf.close()
+print("Success! Results saved to 'results/pennes_bioheat_real_data.xdmf'.")
